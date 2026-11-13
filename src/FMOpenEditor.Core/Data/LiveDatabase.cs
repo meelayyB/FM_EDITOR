@@ -231,7 +231,44 @@ public sealed class LiveDatabase : IGameDatabase
     public object? Read(Entity entity, string key)
     {
         var field = Field(entity.Kind, key) ?? throw new NotSupportedException($"{entity.Kind}.{key} is not mapped for {_def.Version}.");
-        return ReadField(entity.Address, field, PropertyCatalog.Get(entity.Kind, key).Kind);
+        var value = ReadField(entity.Address, field, PropertyCatalog.Get(entity.Kind, key).Kind);
+        if (value is string { Length: > 0 } || key is not ("FirstName" or "LastName" or "CommonName")) return value;
+        return ReadConsolePersonName(entity, key) ?? value;
+    }
+
+    /// <summary>
+    /// FM27 Console / Game Pass can expose a different base subobject through RTTI than the Steam build. The name
+    /// table itself is unchanged, so try the confirmed name-entry slots relative to each base the Console build has
+    /// been observed to expose. This is deliberately read-only; writes still use the definition's verified address.
+    /// </summary>
+    private string? ReadConsolePersonName(Entity entity, string key)
+    {
+        var part = key switch { "FirstName" => 0, "LastName" => 8, "CommonName" => 16, _ => -1 };
+        if (part < 0 || entity.Kind is not (EntityKind.Player or EntityKind.Staff)) return null;
+
+        // db::PERSON base, complete player object, Console player-array subobject, complete staff object.
+        var bases = entity.Kind == EntityKind.Player
+            ? new[] { 0x50, 0x2D8, 0x228 }
+            : new[] { 0x50, 0x150 };
+        foreach (var offset in bases)
+        {
+            try
+            {
+                var entry = _memory.ReadPointer(entity.Address + offset + part);
+                if (entry == 0) continue;
+                var str = _memory.ReadPointer(entry);
+                if (str == 0) continue;
+                var length = _memory.ReadInt32(str);
+                if (length is <= 0 or > 256) continue;
+                var name = Encoding.UTF8.GetString(_memory.ReadBytes(str + 4, length));
+                if (name.Any(char.IsLetter) && !name.Any(char.IsControl)) return name;
+            }
+            catch
+            {
+                // A candidate that is not this build's base simply is not readable.
+            }
+        }
+        return null;
     }
 
     public void Write(Entity entity, string key, object? value)
