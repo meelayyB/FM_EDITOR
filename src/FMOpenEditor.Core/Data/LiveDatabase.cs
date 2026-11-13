@@ -102,6 +102,8 @@ public sealed class LiveDatabase : IGameDatabase
                 IEnumerable<nint>? records = null;
                 if (col.Layout == CollectionLayout.RttiInstances) records = rttiRecords.GetValueOrDefault(kind.ToString());
                 else if (_roots.TryGetValue(col.Root, out var root)) records = EnumerateRecords(root, col);
+                if (kind == EntityKind.Player && (records is null || !records.Any()))
+                    records = EnumerateFm27ConsolePlayers();
                 if (records is not null)
                 try
                 {
@@ -125,6 +127,42 @@ public sealed class LiveDatabase : IGameDatabase
             }
             _entities[kind] = list;
             _byId[kind] = ids;
+        }
+    }
+
+    /// <summary>
+    /// FM27 Console / Game Pass 0.9.2437.0 does not expose the Steam player's RTTI vtable, but its confirmed
+    /// global player vector is at game_plugin.dll+0x538ACC0. Each vector entry points 0xB0 bytes into the full
+    /// player object. The editor uses db::PERSON as its record base, at full object +0x288.
+    /// </summary>
+    private IEnumerable<nint> EnumerateFm27ConsolePlayers()
+    {
+        if (!_def.Version.StartsWith("27.", StringComparison.Ordinal)) yield break;
+
+        const long vectorRva = 0x538ACC0;
+        var header = _moduleBase + (nint)vectorRva;
+        nint begin;
+        nint end;
+        try
+        {
+            begin = _memory.ReadPointer(header);
+            end = _memory.ReadPointer(header + 8);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        var count = (end - begin) / 8;
+        if (begin == 0 || end < begin || count is <= 0 or > 200_000) yield break;
+
+        Warnings.Add($"Players: using FM27 Console player vector ({count:N0} records).");
+        for (var i = 0; i < count; i++)
+        {
+            nint playerPart;
+            try { playerPart = _memory.ReadPointer(begin + i * 8); }
+            catch { continue; }
+            if (playerPart != 0) yield return playerPart + 0x1D8;
         }
     }
 
